@@ -13,7 +13,7 @@ st.set_page_config(page_title="제주 EV 스케줄링 최종 비교", layout="wi
 st.title("🏆 AS-IS vs TO-BE 통합 성과 분석 리포트")
 st.markdown("충전소 가동률, 처리량, 사업자 순이익 및 고객 만족도를 정량적으로 비교 분석합니다.")
 
-EXCEL_PATH = '제주도_충전소_아파트제외_최종.xlsx'
+EXCEL_PATH = 'jeju.data.xlsx'
 TOTAL_SLOTS = 24 * 6 
 PROFIT_PER_MIN = 300 # 1분당 충전 수익 마진 가정
 
