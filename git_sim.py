@@ -10,27 +10,38 @@ import plotly.graph_objects as go
 # ==========================================
 st.set_page_config(page_title="제주 EV 핫스팟 스케줄링", layout="wide")
 st.title("⚡ 제주도 EV '핫스팟 집중관리' 분산 시뮬레이터")
-st.markdown("전체 1,616개 충전소 중 **주요 밀집 구역(상위 20%)**에 수요를 집중시키고, 오버부킹 시 **전체 인프라로 분산**시키는 현실적인 모델입니다.")
 
-# 깃허브 업로드용 경로
 EXCEL_PATH = '제주도_충전소_아파트제외_최종.xlsx'
-TOTAL_SLOTS = 24 * 6 # 10분 단위 (하루 144슬롯)
+TOTAL_SLOTS = 24 * 6 
 
 @st.cache_data
 def load_full_data():
     try:
         df = pd.read_excel(EXCEL_PATH)
         
-        # [수정 포인트 1] 데이터 유무 및 필수 컬럼 확인 안전장치
-        if df.empty:
-            st.error("엑셀 파일에 데이터가 없습니다.")
-            return pd.DataFrame()
-            
-        # 필수 컬럼이 있는지 확인하고 누락된 행 제거
-        df = df.dropna(subset=['lat', 'lng', 'statNm', 'addr'])
+        # [진단용 추가] 실제 엑셀의 컬럼명을 화면에 출력해줍니다.
+        # st.write("불러온 엑셀 컬럼명:", list(df.columns)) 
         
         if df.empty:
-            st.error("필수 항목(위도, 경도 등)이 누락되어 분석할 수 있는 데이터가 없습니다.")
+            st.error("엑셀 파일이 비어있습니다.")
+            return pd.DataFrame()
+
+        # 컬럼명 앞뒤 공백 제거 (매우 중요)
+        df.columns = df.columns.str.strip()
+        
+        # 필수 컬럼이 있는지 확인 (대소문자 구분 없이 처리하면 좋지만 일단 정확히 일치해야 함)
+        required_cols = ['lat', 'lng', 'statNm', 'addr']
+        missing_cols = [c for c in required_cols if c not in df.columns]
+        
+        if missing_cols:
+            st.error(f"엑셀에 다음 컬럼이 없습니다: {missing_cols}. 엑셀 파일의 첫 줄(헤더)을 확인해주세요.")
+            return pd.DataFrame()
+
+        # 누락 데이터 제거
+        df = df.dropna(subset=required_cols)
+        
+        if df.empty:
+            st.error("필수 항목(위도, 경도 등)에 빈 칸이 너무 많아 데이터가 모두 삭제되었습니다.")
             return pd.DataFrame()
 
         def assign_region(addr):
@@ -47,7 +58,7 @@ def load_full_data():
 df_stations = load_full_data()
 
 # ==========================================
-# 1. 사이드바 (현실적 변수 설정)
+# 1. 사이드바 설정
 # ==========================================
 st.sidebar.header("📋 현실 기반 시뮬레이션 설정")
 daily_requests = st.sidebar.slider("일일 총 예약 요청 수", 5000, 15000, 10000, step=1000)
@@ -56,17 +67,17 @@ reward_val = st.sidebar.number_input("기본 이동 보상 (원)", value=3000)
 time_cost = st.sidebar.number_input("시간 비용 (원/분)", value=200)
 
 # ==========================================
-# 2. 시뮬레이션 엔진 (핵심 의사결정 로직 포함)
+# 2. 시뮬레이션 엔진
 # ==========================================
 def run_hotspot_sim():
-    # [수정 포인트 2] 데이터가 없을 경우 리스트 선택 오류 방지
+    # 데이터가 비어있으면 함수 종료 (IndexError 방지 핵심)
     if df_stations.empty:
         return 0, 0, np.zeros(1), [], set()
 
     stations = df_stations.to_dict('records')
     total_count = len(stations)
     
-    # 핫스팟 개수가 최소 1개는 되도록 설정 (IndexError 방지 핵심)
+    # 핫스팟 개수 계산
     hotspot_count = max(1, int(total_count * 0.2))
     hotspot_indices = set(random.sample(range(total_count), hotspot_count))
     
@@ -84,7 +95,6 @@ def run_hotspot_sim():
         charge_mins = max(10, int(np.random.lognormal(3.2, 0.5)))
         duration = math.ceil(charge_mins / 10)
         
-        # 핫스팟 혹은 일반 충전소 타겟팅
         if np.random.rand() < 0.8:
             target_idx = random.choice(list(hotspot_indices))
         else:
@@ -92,20 +102,15 @@ def run_hotspot_sim():
             
         source_st = stations[target_idx]
         
-        # 빈 자리일 경우 정상 예약
         if np.sum(charger_slots[target_idx][req_slot:req_slot+duration]) == 0:
-            if np.random.rand() > 0.15: # 노쇼 15% 반영
+            if np.random.rand() > 0.15: 
                 charger_slots[target_idx][req_slot:req_slot+duration] = 1
                 occupancy_counts[target_idx] += charge_mins
-        
-        # ★ 오버부킹 발생 (충돌) ★
         else:
             conflicts += 1
-            
-            # 같은 권역 내 대안 검색
             same_region_stations = [
                 (i, s) for i, s in enumerate(stations) 
-                if s['region'] == source_st['region'] and i != target_idx
+                if s.get('region') == source_st.get('region') and i != target_idx
             ]
             
             best_alt = None
@@ -114,29 +119,17 @@ def run_hotspot_sim():
                 dist = math.sqrt((source_st['lat']-alt_st['lat'])**2 + (source_st['lng']-alt_st['lng'])**2) * 111
                 if dist < search_radius and dist < min_dist:
                     if np.sum(charger_slots[i][req_slot:req_slot+duration]) == 0:
-                        min_dist = dist
-                        best_alt = (i, alt_st, dist)
+                        min_dist, best_alt = dist, (i, alt_st, dist)
             
             if best_alt:
-                soc_org = random.randint(5, 50) 
-                soc_ovb = random.randint(5, 50) 
-                
-                # 다음 예약자 침범 여부 체크
+                soc_org, soc_ovb = random.randint(5, 50), random.randint(5, 50)
                 wait_start = req_slot + duration
                 wait_end = min(TOTAL_SLOTS, wait_start + duration)
                 
-                intrusion = False
-                if wait_start < TOTAL_SLOTS:
-                    if np.sum(charger_slots[target_idx][wait_start:wait_end]) > 0:
-                        intrusion = True
-                else:
-                    intrusion = True 
-                
-                def can_reach(soc, dist):
-                    return (soc * 3.0) >= dist
+                intrusion = (np.sum(charger_slots[target_idx][wait_start:wait_end]) > 0) if wait_start < TOTAL_SLOTS else True
                 
                 def calculate_choice(soc, dist, is_forced):
-                    if not can_reach(soc, dist): return False 
+                    if (soc * 3.0) < dist: return False 
                     actual_reward = reward_val * 2 if is_forced else reward_val
                     move_utility = actual_reward - (dist/30*60 * time_cost) - (dist * 50)
                     wait_loss = -(charge_mins * time_cost)
@@ -144,12 +137,10 @@ def run_hotspot_sim():
 
                 resolved = False
                 if soc_org > soc_ovb:
-                    if calculate_choice(soc_org, min_dist, is_forced=False):
-                        resolved = True
-                    else:
-                        resolved = calculate_choice(soc_ovb, min_dist, is_forced=intrusion)
+                    if calculate_choice(soc_org, min_dist, False): resolved = True
+                    else: resolved = calculate_choice(soc_ovb, min_dist, intrusion)
                 else:
-                    resolved = calculate_choice(soc_ovb, min_dist, is_forced=intrusion)
+                    resolved = calculate_choice(soc_ovb, min_dist, intrusion)
                 
                 if resolved:
                     moved += 1
@@ -161,54 +152,50 @@ def run_hotspot_sim():
     return conflicts, moved, occupancy_counts, redirect_paths, hotspot_indices
 
 # ==========================================
-# 3. 메인 실행부 및 결과 출력
+# 3. 메인 실행부
 # ==========================================
 if st.sidebar.button("🚀 시뮬레이션 실행", type="primary"):
-    with st.spinner("데이터 분석 및 의사결정 시뮬레이션 가동 중..."):
-        c, m, occ, paths, hotspots = run_hotspot_sim()
-    
-    if hotspots:
-        hotspot_occ = [occ[i] for i in hotspots]
-        avg_hotspot_util = np.mean(hotspot_occ) / (24 * 60) * 100
-        avg_total_util = np.mean(occ) / (24 * 60) * 100
-
-        st.markdown("### 📊 스케줄링 성과 지표")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("총 예약 요청", f"{daily_requests:,} 건")
-        col2.metric("오버부킹 발생", f"{c:,} 건")
-        resolution_rate = (m / c * 100) if c > 0 else 0
-        col3.metric("오버부킹 해결률", f"{resolution_rate:.1f} %", f"{m:,}건 분산 성공")
-        col4.metric("핫스팟 가동률", f"{avg_hotspot_util:.1f} %", f"전체 평균 {avg_total_util:.1f}%")
-
-        st.divider()
-
-        st.subheader("🗺️ 수요 분산 시각화 (초록선 = 이동 성공 경로)")
-        fig = go.Figure()
-        fig.add_trace(go.Scattermapbox(
-            lat=df_stations['lat'], lon=df_stations['lng'],
-            mode='markers',
-            marker=go.scattermapbox.Marker(
-                size=[10 if i in hotspots else 4 for i in range(len(df_stations))],
-                color=occ, colorscale='Hot', showscale=True,
-                colorbar=dict(title="가동시간(분)")
-            ),
-            text=df_stations['statNm']
-        ))
-
-        for p in paths:
-            fig.add_trace(go.Scattermapbox(
-                lat=[p[0]['lat'], p[1]['lat']], lon=[p[0]['lng'], p[1]['lng']],
-                mode='lines', line=dict(width=1.5, color='rgba(0, 255, 100, 0.6)'),
-                showlegend=False
-            ))
-
-        fig.update_layout(
-            mapbox=dict(style="carto-darkmatter", center=dict(lat=33.38, lon=126.55), zoom=9.5),
-            margin={"r":0,"t":0,"l":0,"b":0}, height=700
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    if df_stations.empty:
+        st.warning("분석할 충전소 데이터가 없습니다. 엑셀 파일의 컬럼명(lat, lng, statNm, addr)을 확인해주세요.")
     else:
-        st.warning("데이터가 부족하여 지표를 산출할 수 없습니다.")
+        with st.spinner("데이터 분석 중..."):
+            c, m, occ, paths, hotspots = run_hotspot_sim()
+        
+        if hotspots:
+            hotspot_occ = [occ[i] for i in hotspots]
+            avg_hotspot_util = np.mean(hotspot_occ) / (24 * 60) * 100
+            avg_total_util = np.mean(occ) / (24 * 60) * 100
 
+            st.markdown("### 📊 스케줄링 성과 지표")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("총 예약 요청", f"{daily_requests:,} 건")
+            col2.metric("오버부킹 발생", f"{c:,} 건")
+            res_rate = (m / c * 100) if c > 0 else 0
+            col3.metric("오버부킹 해결률", f"{res_rate:.1f} %", f"{m:,}건 분산")
+            col4.metric("핫스팟 가동률", f"{avg_hotspot_util:.1f} %", f"전체 평균 {avg_total_util:.1f}%")
+
+            st.divider()
+            st.subheader("🗺️ 수요 분산 시각화")
+            fig = go.Figure()
+            fig.add_trace(go.Scattermapbox(
+                lat=df_stations['lat'], lon=df_stations['lng'], mode='markers',
+                marker=go.scattermapbox.Marker(
+                    size=[10 if i in hotspots else 4 for i in range(len(df_stations))],
+                    color=occ, colorscale='Hot', showscale=True,
+                    colorbar=dict(title="분")
+                ),
+                text=df_stations['statNm']
+            ))
+            for p in paths:
+                fig.add_trace(go.Scattermapbox(
+                    lat=[p[0]['lat'], p[1]['lat']], lon=[p[0]['lng'], p[1]['lng']],
+                    mode='lines', line=dict(width=1.5, color='rgba(0, 255, 100, 0.6)'),
+                    showlegend=False
+                ))
+            fig.update_layout(
+                mapbox=dict(style="carto-darkmatter", center=dict(lat=33.38, lon=126.55), zoom=9.5),
+                margin={"r":0,"t":0,"l":0,"b":0}, height=700
+            )
+            st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("👈 일일 요청 수를 설정하고 시뮬레이션을 실행해보세요!")
