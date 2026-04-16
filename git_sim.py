@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="제주 EV 핫스팟 스케줄링", layout="wide")
 st.title("⚡ 제주도 EV '핫스팟 집중관리' 분산 시뮬레이터")
 
-EXCEL_PATH = '제주도_충전소_아파트제외_최종.xlsx'
+EXCEL_PATH = 'jeju_data.xlsx'
 TOTAL_SLOTS = 24 * 6 
 
 @st.cache_data
